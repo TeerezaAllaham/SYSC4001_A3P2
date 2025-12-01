@@ -19,6 +19,7 @@ or
 
 ./Part_A 2 rubric.txt exams/exam*
 
+
 **How to run Part B:**
 
 gcc -o Part_B Part_B.c
@@ -28,6 +29,8 @@ gcc -o Part_B Part_B.c
 or
 
 ./Part_B 2 rubric.txt exams/exam*
+
+
 
 
 *2 = number of TAs... can be any number you want the amount of TAs to be. 
