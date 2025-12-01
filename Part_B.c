@@ -4,6 +4,7 @@
 #include <unistd.h>     // for fork, usleep, getpid
 #include <sys/ipc.h>    // shared memory key creation
 #include <sys/shm.h>    // shared memory functions
+#include <sys/sem.h>    // for semaphores
 #include <sys/types.h>  // for pid_t, system types
 #include <sys/wait.h>   // for wait
 #include <time.h>       // for time
@@ -161,7 +162,7 @@ static int load_exam(SharedData *sh, int exam_index)
 
     // remove newline from the student number line.
     size_t len = strlen(buf);
-    if (len > 0 && buf[len - 1] == '\n')
+    if (len > 0 && buf[len - 1] == '\n') {
         buf[len - 1] = '\0';
     }
 
@@ -211,7 +212,7 @@ static void ta(int id, SharedData *sh)
             printf("[TA %d] Reviewing rubric line %d: '%s'\n",
                    id, q + 1, line);
 
-            sleep_ms_range(500, 1000);
+            sleep_ms(500, 1000);
 
             // randomly decide to correct (25% chance)
             if (rand() % 4 == 0) {
@@ -267,7 +268,7 @@ static void ta(int id, SharedData *sh)
 
             printf("[TA %d] Marking student %s question %d...\n",
                    id, sh->current_student, picked_q + 1);
-            sleep_ms_range(1000, 2000);
+            sleep_ms(1000, 2000);
 
             // mark completion inside question semaphore
             sem_wait_one(sem_question);
