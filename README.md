@@ -10,13 +10,16 @@ Multiple TA processes concurrently:
 - Terminate when the student (9999) is reached.
 
 **How to run Part A:**
-\n gcc -o Part_A Part_A.c
+
+gcc -o Part_A Part_A.c
 ./Part_A 2 rubric.txt exams/exam1 exams/exam2 exams/exam20
 or
 ./Part_A 2 rubric.txt exams/exam*
 
 **How to run Part B:**
+
 gcc -o Part_B Part_B.c
+
 ./Part_B 2 Part_A_rubric.txt exams/exam1 exams/exam2 exams/exam20
 or
 ./Part_B 2 rubric.txt exams/exam*
