@@ -42,6 +42,52 @@ static void sleep_ms(int min_ms, int max_ms)
     usleep(ms * 1000);  // convert to microseconds
 }
 
+// semaphore IDs
+static int sem_rubric  = -1;   // protects rubric corrections + file I/O
+static int sem_question = -1;  // protects question_state[]
+static int sem_exam    = -1;   // protects current_exam_index + load_exam()
+
+// system V semaphores need this union for semctl() on some systems
+union semun {
+    int val;
+    struct semid_ds *buf;
+    unsigned short *array;
+};
+
+// initialize semaphore to value
+static void sem_init_one(int semid, int value)
+{
+    union semun arg;
+    arg.val = value;
+    // use value = 1 to act like a mutex 
+    if (semctl(semid, 0, SETVAL, arg) == -1) {
+        perror("semctl SETVAL");
+        exit(EXIT_FAILURE);
+    }
+}
+
+// p operation / wait / down
+static void sem_wait_one(int semid)
+{
+    // semaphore 0, decrement by 1, defult flags
+    struct sembuf op = {0, -1, 0};  
+    if (semop(semid, &op, 1) == -1) {
+        perror("semop wait");
+        exit(EXIT_FAILURE);
+    }
+}
+
+// v operation / signal / up.
+static void sem_signal_one(int semid)
+{
+    // semaphore 0, increment by 1, defult flags
+    struct sembuf op = {0, +1, 0};
+    if (semop(semid, &op, 1) == -1) {
+        perror("semop signal");
+        exit(EXIT_FAILURE);
+    }
+}
+
 // load rubric from file into shared memory
 static int load_rubric(const char *path, SharedData *sh)
 {
@@ -69,6 +115,7 @@ static int load_rubric(const char *path, SharedData *sh)
     return 0;
 }
 
+// save rubric from shared memory back to file
 static int save_rubric(const char *path, SharedData *sh)
 {
     FILE *f = fopen(path, "w");
@@ -89,7 +136,6 @@ static int save_rubric(const char *path, SharedData *sh)
 // load exam file into shared memory
 static int load_exam(SharedData *sh, int exam_index)
 {
-    // Write all 5 lines back
     if (exam_index < 0 || exam_index >= num_exams) {
         fprintf(stderr, "No more exams (index %d)\n", exam_index);
         sh->terminate = 1;
@@ -113,24 +159,24 @@ static int load_exam(SharedData *sh, int exam_index)
         return -1;
     }
 
-    // strip newline
+    // remove newline from the student number line.
     size_t len = strlen(buf);
-    if (len > 0 && buf[len - 1] == '\n') {
+    if (len > 0 && buf[len - 1] == '\n')
         buf[len - 1] = '\0';
     }
 
-    // copy student number
+    // store student number into shared memory 
     strncpy(sh->current_student, buf, STUDENT_LEN - 1);
     sh->current_student[STUDENT_LEN - 1] = '\0';
 
-    // reset question states
+    // all questions start as untouched.
     for (int i = 0; i < MAX_RUBRIC_LINES; i++) {
         sh->question_state[i] = Q_UNTOUCHED;
     }
 
     printf("[PARENT] Loaded exam %d (%s) student %s into shared memory.\n", exam_index, path, sh->current_student);
 
-    // check for student ID 9999
+    // check for sentinel student ID 9999
     if (atoi(sh->current_student) == 9999) {
         printf("[PARENT] student 9999 reached. TAs will exit.\n");
         sh->terminate = 1;
@@ -143,30 +189,29 @@ static int load_exam(SharedData *sh, int exam_index)
 // TA process function
 static void ta(int id, SharedData *sh)
 {
-    // ensure each TA has different random seed
     srand(getpid());
-
     printf("[TA %d, PID %d] Started.\n", id, getpid());
 
-    // TA runs until terminate flag is raised
     while (1) {
+        // check global terminate flag regularly
         if (sh->terminate) {
             printf("[TA %d] Terminate flag set. Exiting.\n", id);
             break;
         }
 
-        // check and maybe correct rubric
+        // rubric correction section 
+        sem_wait_one(sem_rubric);
         printf("[TA %d] Checking rubric for student %s (exam %d).\n",
                id, sh->current_student, sh->current_exam_index);
 
         for (int q = 0; q < MAX_RUBRIC_LINES; q++) {
             char *line = sh->rubric[q];
-            if (line[0] == '\0') continue;  // skip empty lines
+            if (line[0] == '\0') continue;
 
-            printf("[TA %d] Reviewing rubric line %d: '%s'\n", id, q + 1, line);
+            printf("[TA %d] Reviewing rubric line %d: '%s'\n",
+                   id, q + 1, line);
 
-            // simulate review time 0.5–1.0 seconds
-            sleep_ms(500, 1000);
+            sleep_ms_range(500, 1000);
 
             // randomly decide to correct (25% chance)
             if (rand() % 4 == 0) {
@@ -174,27 +219,33 @@ static void ta(int id, SharedData *sh)
                 if (comma && comma[1] != '\0') {
                     char *c = &comma[1];
                     // increment the score by 1 to shift ascii value
-                    (*c)++;
-                    printf("[TA %d] Corrected rubric line %d -> '%s'\n", id, q + 1, line);
+                    (*c)++; 
+                    printf("[TA %d] Corrected rubric line %d -> '%s'\n",
+                           id, q + 1, line);
                 }
             }
         }
 
-        // save rubric back to file
         printf("[TA %d] Writing rubric back to file: %s\n", id, rubric_path);
         save_rubric(rubric_path, sh);
+        sem_signal_one(sem_rubric);
+        // end rubric correction section
 
-        // mark questions
+        // marking questions
         int all_done = 0;
-        while (!all_done && !sh->terminate) {
-            all_done = 1;
 
-            // pick a question to mark
+        while (!all_done && !sh->terminate) {
+
             int picked_q = -1;
+
+            // choose question to mark inside question semaphore and update state
+            sem_wait_one(sem_question);
+
+            all_done = 1;
             for (int q = 0; q < MAX_RUBRIC_LINES; q++) {
                 if (sh->question_state[q] == Q_UNTOUCHED) {
                     picked_q = q;
-                    sh->question_state[q] = Q_PROGRESSING; 
+                    sh->question_state[q] = Q_PROGRESSING;
                     all_done = 0;
                     break;
                 }
@@ -203,21 +254,28 @@ static void ta(int id, SharedData *sh)
                 }
             }
 
+            sem_signal_one(sem_question);
+            // end and update state
+
             if (picked_q == -1) {
-                // no more questions to mark
                 if (all_done) {
-                    printf("[TA %d] All questions appear done for student %s.\n", id, sh->current_student);
+                    printf("[TA %d] All questions done for student %s.\n",
+                           id, sh->current_student);
                 }
                 break;
             }
 
-            // simulate marking time 1.0–2.0 seconds
-            printf("[TA %d] Marking student %s question %d...\n", id, sh->current_student, picked_q + 1);
-            sleep_ms(1000, 2000);
+            printf("[TA %d] Marking student %s question %d...\n",
+                   id, sh->current_student, picked_q + 1);
+            sleep_ms_range(1000, 2000);
 
-            // question marked
+            // mark completion inside question semaphore
+            sem_wait_one(sem_question);
             sh->question_state[picked_q] = Q_CORRECTED;
-            printf("[TA %d] Finished marking student %s question %d.\n", id, sh->current_student, picked_q + 1);
+            sem_signal_one(sem_question);
+
+            printf("[TA %d] Finished marking student %s question %d.\n",
+                   id, sh->current_student, picked_q + 1);
         }
 
         if (sh->terminate) {
@@ -227,6 +285,8 @@ static void ta(int id, SharedData *sh)
 
         // try to load next exam if all questions done
         if (all_done && !sh->terminate) {
+            sem_wait_one(sem_exam);
+
             int next_exam = sh->current_exam_index + 1;
             printf("[TA %d] Attempting to load next exam index %d.\n",
                    id, next_exam);
@@ -234,12 +294,14 @@ static void ta(int id, SharedData *sh)
             if (next_exam >= num_exams) {
                 printf("[TA %d] No more exams listed. Setting terminate.\n", id);
                 sh->terminate = 1;
+                sem_signal_one(sem_exam);
                 break;
             }
 
             sh->current_exam_index = next_exam;
             load_exam(sh, next_exam);
 
+            sem_signal_one(sem_exam);
             if (sh->terminate) {
                 printf("[TA %d] Terminate flag set after loading exam. Exiting.\n",
                        id);
@@ -251,12 +313,13 @@ static void ta(int id, SharedData *sh)
     printf("[TA %d, PID %d] Finished.\n", id, getpid());
 }
 
-// main function 
+//main function
 int main(int argc, char *argv[])
 {
-    // expect at least: program, numTAs, rubric, exam1
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <num_TAs>=2 rubric.txt exam1.txt exam2.txt ...\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s <num_TAs>=2 rubric.txt exam1.txt exam2.txt ...\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -266,7 +329,6 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // save rubric path
     strncpy(rubric_path, argv[2], sizeof(rubric_path) - 1);
     rubric_path[sizeof(rubric_path) - 1] = '\0';
 
@@ -295,7 +357,6 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // initialize shared memory
     memset(sh, 0, sizeof(SharedData));
     sh->current_exam_index = 0;
     sh->terminate = 0;
@@ -314,33 +375,56 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // fork TA processes
+    // create semaphores
+    // 0666 gives read+write permissions to everyone
+    sem_rubric = semget(IPC_PRIVATE, 1, IPC_CREAT | 0666);
+    sem_question = semget(IPC_PRIVATE, 1, IPC_CREAT | 0666);
+    sem_exam = semget(IPC_PRIVATE, 1, IPC_CREAT | 0666);
+
+    if (sem_rubric == -1 || sem_question == -1 || sem_exam == -1) {
+        perror("semget");
+        shmdt(sh);
+        shmctl(shmid, IPC_RMID, NULL);
+        return EXIT_FAILURE;
+    }
+
+    sem_init_one(sem_rubric, 1);
+    sem_init_one(sem_question, 1);
+    sem_init_one(sem_exam, 1);
+
+    // fork TA processes 
     for (int i = 0; i < num_TAs; i++) {
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
         } else if (pid == 0) {
-            // child process
+            // child (TA)
             SharedData *child_sh = (SharedData *)shmat(shmid, NULL, 0);
             if (child_sh == (void *)-1) {
                 perror("shmat child");
                 exit(EXIT_FAILURE);
             }
+            // run TA function
             ta(i, child_sh);
+            // detach from shared memory and exit
             shmdt(child_sh);
             exit(EXIT_SUCCESS);
         }
-        // parent continues loop
     }
 
-    //parent wait for all TAs to finish
+    // parent waits for all TAs 
     for (int i = 0; i < num_TAs; i++) {
         wait(NULL);
     }
 
-    // cleanup shared memory
+    // cleanup shared memory 
     shmdt(sh);
     shmctl(shmid, IPC_RMID, NULL);
+
+    // cleanup semaphores
+    semctl(sem_rubric, 0, IPC_RMID);
+    semctl(sem_question, 0, IPC_RMID);
+    semctl(sem_exam, 0, IPC_RMID);
 
     printf("[PARENT] All TAs finished. Cleanup done.\n");
     return EXIT_SUCCESS;
