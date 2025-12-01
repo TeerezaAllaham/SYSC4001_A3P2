@@ -12,8 +12,11 @@ Multiple TA processes concurrently:
 **How to run Part A:**
 
 gcc -o Part_A Part_A.c
+
 ./Part_A 2 rubric.txt exams/exam1 exams/exam2 exams/exam20
+
 or
+
 ./Part_A 2 rubric.txt exams/exam*
 
 **How to run Part B:**
@@ -21,8 +24,11 @@ or
 gcc -o Part_B Part_B.c
 
 ./Part_B 2 Part_A_rubric.txt exams/exam1 exams/exam2 exams/exam20
+
 or
+
 ./Part_B 2 rubric.txt exams/exam*
+
 
 *2 = number of TAs... can be any number you want the amount of TAs to be. 
 For this assignment it was told to start a program with 2 TAs.
